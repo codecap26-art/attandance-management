@@ -1,466 +1,322 @@
 import { useState, useRef, useCallback } from 'react'
 import { format } from 'date-fns'
 import toast from 'react-hot-toast'
-import {
-  Upload, FileSpreadsheet, Download, X,
-  CheckCircle2, Send, ArrowRight, RotateCcw,
-  Settings2, Database
+import { 
+  Upload, FileSpreadsheet, CheckCircle2, 
+  X, Send, ArrowRight, RotateCcw, Database 
 } from 'lucide-react'
 import { importFromExcel } from '../../lib/excel'
 import * as XLSX from 'xlsx'
 import { useAttendance } from '../../hooks/useAttendance'
 import { useCategories } from '../../hooks/useCategories'
+import { useStudents } from '../../hooks/useStudents'
 import LoadingSpinner from '../common/LoadingSpinner'
 
 const TODAY = format(new Date(), 'yyyy-MM-dd')
 
-const STEPS = ['Upload', 'Map Columns', 'Preview & Download']
+/** Robust helper to parse various Excel date formats into yyyy-MM-dd */
+const parseDateValue = (val) => {
+  if (!val) return null;
+  
+  // 1. Handle Excel Serial Numbers (Numbers)
+  if (typeof val === 'number') {
+    try {
+      const date = XLSX.SSF.parse_date_code(val);
+      return format(new Date(date.y, date.m - 1, date.d), 'yyyy-MM-dd');
+    } catch (e) { return null; }
+  }
+
+  // 2. Handle Strings
+  const str = String(val).trim();
+  
+  // Try DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (dmyMatch) {
+    const d = parseInt(dmyMatch[1]);
+    const m = parseInt(dmyMatch[2]) - 1;
+    let y = parseInt(dmyMatch[3]);
+    if (y < 100) y += 2000;
+    const date = new Date(y, m, d);
+    return !isNaN(date.getTime()) ? format(date, 'yyyy-MM-dd') : null;
+  }
+
+  // Fallback to standard JS parsing
+  const date = new Date(val);
+  return !isNaN(date.getTime()) ? format(date, 'yyyy-MM-dd') : null;
+};
 
 export default function ExcelUpload({ onSuccess }) {
   const { insertBulk, loading: submitLoading } = useAttendance()
   const { activeCategories } = useCategories()
+  const { fetchByRegNos } = useStudents()
 
   const fileRef = useRef(null)
-  const [step, setStep] = useState(0)
-  const [dragOver, setDragOver] = useState(false)
-
-  // File data
-  const [fileName, setFileName] = useState('')
-  const [rawHeaders, setRawHeaders] = useState([])
-  const [rawRows, setRawRows] = useState([])
-
-  // Column mapping
-  const [nameCol, setNameCol] = useState('')
-  const [regNoCol, setRegNoCol] = useState('')
-  const [hoursCol, setHoursCol] = useState('')
-
-  // Transformed data
-  const [expandedRows, setExpandedRows] = useState([])
-
-  // Database upload
-  const [date, setDate] = useState(TODAY)
-  const [category, setCategory] = useState('')
+  const [fileData, setFileData] = useState(null) // { fileName, headers, rows }
+  const [mapping, setMapping] = useState({ reg: '', hrs: '', dt: '', cat: '' })
+  const [previewRows, setPreviewRows] = useState([])
+  const [isValidating, setIsValidating] = useState(false)
+  
+  // Global fallbacks
+  const [globalDate, setGlobalDate] = useState(TODAY)
+  const [globalCategory, setGlobalCategory] = useState('')
   const [declared, setDeclared] = useState(false)
 
-  // ── Upload ─────────────────────────────────────────────
-  const handleFile = useCallback(async (file) => {
+  // 1. Handle File Upload
+  const handleFile = async (file) => {
     if (!file) return
-    const ext = file.name.split('.').pop().toLowerCase()
-    if (!['xlsx', 'xls', 'csv'].includes(ext)) {
-      toast.error('Please upload an .xlsx, .xls, or .csv file.')
-      return
-    }
-
     try {
       const { headers, rows } = await importFromExcel(file)
-      if (rows.length === 0) {
-        toast.error('The uploaded file has no data rows.')
-        return
-      }
+      if (rows.length === 0) return toast.error('File is empty')
 
-      setFileName(file.name)
-      setRawHeaders(headers)
-      setRawRows(rows)
-
-      // Auto-detect columns
+      // Auto-detect columns using 7376 pattern
+      let detReg = '', detHrs = '', detDt = '', detCat = ''
       for (const h of headers) {
         const low = h.toLowerCase().replace(/[^a-z0-9]/g, '')
-        if (['name', 'fullname', 'studentname'].includes(low)) setNameCol(h)
-        if (['registernumber', 'regno', 'regnum', 'rollno', 'rollnumber', 'registrationno', 'regnumber'].includes(low)) setRegNoCol(h)
-        if (['attendancehours', 'hours', 'period', 'periods', 'attendanceperiods'].includes(low)) setHoursCol(h)
+        const val = String(rows[0]?.[h] ?? '')
+        if (!detReg && (low.includes('reg') || low.includes('roll') || val.startsWith('7376'))) detReg = h
+        if (!detHrs && (low.includes('hour') || low.includes('period'))) detHrs = h
+        if (!detDt && low.includes('date')) detDt = h
+        if (!detCat && (low.includes('category') || low.includes('type'))) detCat = h
       }
 
-      setStep(1)
-      toast.success(`Loaded ${rows.length} rows from "${file.name}"`)
+      setFileData({ fileName: file.name, headers, rows })
+      setMapping({ reg: detReg, hrs: detHrs, dt: detDt, cat: detCat })
+      setPreviewRows([]) // Clear previous preview
+      toast.success(`Loaded ${file.name}`)
     } catch (err) {
-      toast.error(`Error reading file: ${err.message}`)
+      toast.error('Error reading file')
     }
-  }, [])
-
-  const onDrop = useCallback((e) => {
-    e.preventDefault()
-    setDragOver(false)
-    handleFile(e.dataTransfer.files[0])
-  }, [handleFile])
-
-  // ── Transform ──────────────────────────────────────────
-  function transformData() {
-    if (!nameCol || !regNoCol || !hoursCol) {
-      toast.error('Please map all three columns.')
-      return
-    }
-
-    const expanded = []
-    for (const row of rawRows) {
-      const name = String(row[nameCol] ?? '').trim()
-      const regNo = String(row[regNoCol] ?? '').trim()
-      const hoursRaw = String(row[hoursCol] ?? '').trim()
-
-      if (!regNo || !hoursRaw) continue
-
-      // Split comma-separated hours
-      const hours = hoursRaw.split(/[,\s]+/).map(h => h.trim()).filter(h => h.length > 0)
-
-      for (const hour of hours) {
-        expanded.push({
-          Name: name,
-          'Register number': regNo,
-          'Attendance hours': hour,
-        })
-      }
-    }
-
-    if (expanded.length === 0) {
-      toast.error('No data to transform. Check your column mapping.')
-      return
-    }
-
-    setExpandedRows(expanded)
-    setStep(2)
-    toast.success(`Expanded to ${expanded.length} rows`)
   }
 
-  // ── Download ───────────────────────────────────────────
-  function downloadExcel() {
-    if (expandedRows.length === 0) return
+  // 2. Transform & Authenticate (Single Action)
+  const generatePreview = async () => {
+    if (!mapping.reg || !mapping.hrs) return toast.error('Map Reg No and Hours first')
+    
+    setIsValidating(true)
+    const expanded = []
+    const regNos = new Set()
 
-    const worksheet = XLSX.utils.json_to_sheet(expandedRows)
-    worksheet['!cols'] = [
-      { wch: 22 },  // Name
-      { wch: 20 },  // Register number
-      { wch: 18 },  // Attendance hours
-    ]
+    fileData.rows.forEach(row => {
+      const regNo = String(row[mapping.reg] ?? '').trim()
+      const hrsRaw = String(row[mapping.hrs] ?? '').trim()
+      if (!regNo || !hrsRaw) return
 
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Attendance')
+      regNos.add(regNo)
+      
+      // Use row-level category if available, otherwise fallback to global
+      const rowCat = mapping.cat && row[mapping.cat] 
+        ? String(row[mapping.cat] ?? '').trim() 
+        : globalCategory
 
-    const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' })
-    const blob = new Blob([wbout], {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      hrsRaw.split(/[,\s]+/).forEach(h => {
+        if (h.trim()) expanded.push({
+          reg: regNo,
+          hour: h.trim(),
+          date: rowDt || globalDate,
+          category: rowCat || globalCategory,
+          name: 'Checking...',
+          isValid: false
+        })
+      })
     })
 
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    const baseName = fileName.replace(/\.[^.]+$/, '')
-    a.download = `${baseName}_expanded.xlsx`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-
-    toast.success('Excel file downloaded!')
-  }
-
-  // ── Submit to Database ─────────────────────────────────
-  async function handleSubmitToDb() {
-    if (expandedRows.length === 0) { toast.error('No data to submit.'); return }
-    if (!date) { toast.error('Select a date.'); return }
-    if (!category) { toast.error('Select a category.'); return }
-    if (!declared) { toast.error('Please confirm the declaration.'); return }
-
-    const entries = expandedRows.map(row => ({
-      reg_no: row['Register number'],
-      email: null,
-      date,
-      period: Number(row['Attendance hours']),
-      category,
-      declared: true,
-    }))
-
-    const toastId = toast.loading(`Inserting ${entries.length} records…`)
-    const result = await insertBulk(entries)
-    toast.dismiss(toastId)
-
-    if (result.errors.length > 0) {
-      toast.error(`Error: ${result.errors[0]}`)
-      return
+    try {
+      const students = await fetchByRegNos(Array.from(regNos))
+      const studentMap = new Map(students.map(s => [s.reg_no.toLowerCase(), s.full_name]))
+      
+      expanded.forEach(row => {
+        const name = studentMap.get(row.reg.toLowerCase())
+        row.name = name || 'Not Found'
+        row.isValid = !!name
+      })
+      
+      setPreviewRows(expanded)
+    } catch (e) {
+      toast.error('Auth failed')
+    } finally {
+      setIsValidating(false)
     }
-
-    toast.success(
-      `${result.inserted} record${result.inserted !== 1 ? 's' : ''} saved!` +
-      (result.duplicates.length > 0 ? ` ${result.duplicates.length} duplicate(s) skipped.` : '')
-    )
-    resetAll()
-    onSuccess?.()
   }
 
-  function resetAll() {
-    setStep(0)
-    setFileName('')
-    setRawHeaders([])
-    setRawRows([])
-    setNameCol('')
-    setRegNoCol('')
-    setHoursCol('')
-    setExpandedRows([])
-    setDate(TODAY)
-    setCategory('')
-    setDeclared(false)
-    if (fileRef.current) fileRef.current.value = ''
+  // 3. Final Submit
+  const handleSubmit = async () => {
+    if (!declared) return toast.error('Please confirm the declaration')
+    const validOnes = previewRows.filter(r => r.isValid)
+    if (validOnes.length === 0) return toast.error('No valid records')
+
+    const toastId = toast.loading(`Saving ${validOnes.length} records...`)
+    const result = await insertBulk(validOnes.map(r => ({
+      reg_no: r.reg,
+      date: r.date,
+      period: Number(r.hour),
+      category: r.category || globalCategory,
+      declared: true
+    })))
+    
+    toast.dismiss(toastId)
+    if (result.errors.length === 0) {
+      toast.success(`Successfully saved ${result.inserted} records!`)
+      setFileData(null)
+      setPreviewRows([])
+      onSuccess?.()
+    } else {
+      toast.error(result.errors[0])
+    }
   }
 
-  // ── Render ─────────────────────────────────────────────
   return (
-    <div className="space-y-6">
-      {/* Stepper */}
-      <div className="flex items-center gap-1 mb-2">
-        {STEPS.map((label, i) => (
-          <div key={label} className="flex items-center gap-1">
-            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all duration-200 ${
-              i < step ? 'bg-green-100 text-green-700' :
-              i === step ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200' :
-              'bg-gray-100 text-gray-400'
-            }`}>
-              {i < step ? <CheckCircle2 size={12} /> : <span className="w-4 text-center">{i + 1}</span>}
-              <span className="hidden sm:inline">{label}</span>
+    <div className="max-w-5xl mx-auto space-y-6 p-4">
+      {/* 1. UPLOAD AREA */}
+      {!fileData ? (
+        <div 
+          onClick={() => fileRef.current?.click()}
+          className="border-2 border-dashed border-indigo-200 rounded-3xl p-12 text-center bg-indigo-50/30 hover:bg-indigo-50 transition-all cursor-pointer group"
+        >
+          <input ref={fileRef} type="file" className="hidden" onChange={e => handleFile(e.target.files[0])} />
+          <Upload className="mx-auto text-indigo-400 group-hover:scale-110 transition-transform mb-4" size={48} />
+          <h3 className="text-lg font-bold text-indigo-900">Drop Attendance Excel Here</h3>
+          <p className="text-sm text-indigo-500/70">Automatic Register Number (7376...) & Hours detection</p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-hidden">
+          {/* Header */}
+          <div className="bg-indigo-600 p-6 text-white flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <FileSpreadsheet /> {fileData.fileName}
+              </h2>
+              <p className="text-indigo-100 text-xs">{fileData.rows.length} rows detected</p>
             </div>
-            {i < STEPS.length - 1 && (
-              <ArrowRight size={14} className={`${i < step ? 'text-green-400' : 'text-gray-300'}`} />
+            <button onClick={() => setFileData(null)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
+              <RotateCcw size={20} />
+            </button>
+          </div>
+
+          <div className="p-6 space-y-8">
+            {/* ONLY DEFAULT VALUES */}
+            <div className="max-w-xl mx-auto p-6 bg-indigo-50/50 rounded-2xl border border-indigo-100 shadow-sm space-y-4">
+              <h4 className="text-xs font-bold text-indigo-400 uppercase tracking-widest flex items-center gap-2 justify-center">
+                <CheckCircle2 size={14} /> Set Attendance Details
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] font-bold text-indigo-600 mb-1 block uppercase">Attendance Date</label>
+                  <input type="date" className="w-full text-sm p-2.5 rounded-xl border border-indigo-200 focus:ring-2 focus:ring-indigo-200 outline-none transition-all" value={globalDate} onChange={e => setGlobalDate(e.target.value)} />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-indigo-600 mb-1 block uppercase">Attendance Category</label>
+                  <select className="w-full text-sm p-2.5 rounded-xl border border-indigo-200 focus:ring-2 focus:ring-indigo-200 outline-none bg-white transition-all" value={globalCategory} onChange={e => setGlobalCategory(e.target.value)}>
+                    <option value="">— Select Category —</option>
+                    {activeCategories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                  </select>
+                </div>
+              </div>
+              {(!mapping.reg || !mapping.hrs) ? (
+                <p className="text-[10px] text-center text-red-500 font-medium">
+                  ⚠️ Auto-detection failed. Please ensure file has "Register Number" and "Hours" columns.
+                </p>
+              ) : (
+                <div className="text-[10px] text-center space-y-1">
+                  <p className="text-green-600 font-medium italic">
+                    ✓ Found: "{mapping.reg}" & "{mapping.hrs}"
+                  </p>
+                  {mapping.cat && (
+                    <p className="text-indigo-400 italic">
+                      ℹ Also using "{mapping.cat}" from file for categories.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 3. GENERATE PREVIEW BUTTON */}
+            <button 
+              onClick={generatePreview}
+              disabled={isValidating}
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 text-white rounded-xl font-bold transition-all shadow-lg flex items-center justify-center gap-2"
+            >
+              {isValidating ? <LoadingSpinner size="sm" /> : <ArrowRight size={18} />}
+              {isValidating ? 'Authenticating Students...' : 'Analyze & Show Preview'}
+            </button>
+
+            {/* 4. PREVIEW TABLE */}
+            {previewRows.length > 0 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="border border-gray-100 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-500 text-[10px] font-bold uppercase">
+                      <tr>
+                        <th className="px-4 py-3 text-left">#</th>
+                        <th className="px-4 py-3 text-left">Reg No</th>
+                        <th className="px-4 py-3 text-left w-24 text-center">Hrs</th>
+                        <th className="px-4 py-3 text-left">Date</th>
+                        <th className="px-4 py-3 text-left">Status</th>
+                        <th className="px-4 py-3 text-left">Name (from DB)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {previewRows.map((row, i) => (
+                        <tr key={i} className={row.isValid ? 'hover:bg-indigo-50/30' : 'bg-red-50/30'}>
+                          <td className="px-4 py-2 text-gray-400 text-xs">{i+1}</td>
+                          <td className="px-4 py-2">
+                            <input 
+                              type="text" 
+                              className="text-xs p-1 border rounded w-32 font-mono bg-transparent"
+                              value={row.reg}
+                              onChange={(e) => {
+                                const newRows = [...previewRows]
+                                newRows[i].reg = e.target.value
+                                setPreviewRows(newRows)
+                              }}
+                            />
+                          </td>
+                          <td className="px-4 py-2 text-center">
+                            <span className="bg-gray-100 px-2 py-1 rounded text-xs font-bold text-gray-600">{row.hour}</span>
+                          </td>
+                          <td className="px-4 py-2">
+                            <input 
+                              type="date" 
+                              className="text-xs p-1 border rounded bg-transparent"
+                              value={row.date}
+                              onChange={(e) => {
+                                const newRows = [...previewRows]
+                                newRows[i].date = e.target.value
+                                setPreviewRows(newRows)
+                              }}
+                            />
+                          </td>
+                          <td className="px-4 py-2">
+                            {row.isValid ? 
+                              <span className="text-[10px] font-bold text-green-600 flex items-center gap-1 uppercase"><CheckCircle2 size={12}/> OK</span> :
+                              <span className="text-[10px] font-bold text-red-600 flex items-center gap-1 uppercase"><X size={12}/> ERROR</span>
+                            }
+                          </td>
+                          <td className={`px-4 py-2 font-bold ${row.isValid ? 'text-gray-800' : 'text-red-600'}`}>{row.name}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* 5. FINAL DECLARE & SUBMIT */}
+                <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 flex flex-col items-center gap-4">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" className="w-5 h-5 rounded-lg text-indigo-600" checked={declared} onChange={e => setDeclared(e.target.checked)} />
+                    <span className="text-sm font-medium text-gray-700">I verify that this attendance data is correct</span>
+                  </label>
+                  <button 
+                    disabled={!declared || submitLoading}
+                    onClick={handleSubmit}
+                    className="px-8 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white rounded-xl font-bold flex items-center gap-2 shadow-lg transition-all"
+                  >
+                    {submitLoading ? <LoadingSpinner size="sm" /> : <Send size={18} />}
+                    Finalize & Save Attendance
+                  </button>
+                </div>
+              </div>
             )}
           </div>
-        ))}
-        {step > 0 && (
-          <button type="button" onClick={resetAll}
-            className="ml-auto text-xs text-gray-400 hover:text-red-500 flex items-center gap-1 transition-colors">
-            <RotateCcw size={12} /> Start Over
-          </button>
-        )}
-      </div>
-
-      {/* ── Step 0: Upload ─────────────────────────────── */}
-      {step === 0 && (
-        <div
-          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
-          onClick={() => fileRef.current?.click()}
-          className={`relative cursor-pointer rounded-2xl border-2 border-dashed p-10 text-center transition-all duration-300 ${
-            dragOver
-              ? 'border-indigo-400 bg-indigo-50 scale-[1.01]'
-              : 'border-gray-200 bg-gray-50/50 hover:border-indigo-300 hover:bg-indigo-50/50'
-          }`}
-        >
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
-            onChange={e => handleFile(e.target.files[0])} />
-          <div className={`mx-auto w-16 h-16 rounded-2xl flex items-center justify-center mb-4 transition-all duration-300 ${
-            dragOver ? 'bg-indigo-200 rotate-3 scale-110' : 'bg-gradient-to-br from-indigo-100 to-purple-100'
-          }`}>
-            <Upload size={28} className={`transition-colors ${dragOver ? 'text-indigo-600' : 'text-indigo-500'}`} />
-          </div>
-          <p className="text-sm font-semibold text-gray-700 mb-1">
-            {dragOver ? 'Drop your file here!' : 'Drag & drop your Excel file here'}
-          </p>
-          <p className="text-xs text-gray-400">or click to browse — .xlsx, .xls, .csv</p>
-
-          {/* Expected format hint */}
-          <div className="mt-5 mx-auto max-w-sm">
-            <p className="text-xs text-gray-500 font-medium mb-2">Expected format:</p>
-            <div className="overflow-hidden rounded-lg border border-gray-200 text-xs">
-              <table className="w-full">
-                <thead className="bg-gray-100">
-                  <tr>
-                    <th className="px-3 py-1.5 text-left text-gray-600 font-semibold">Name</th>
-                    <th className="px-3 py-1.5 text-left text-gray-600 font-semibold">Register number</th>
-                    <th className="px-3 py-1.5 text-left text-gray-600 font-semibold">Attendance hours</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  <tr><td className="px-3 py-1">Saran S</td><td className="px-3 py-1 font-mono">7376252CS101</td><td className="px-3 py-1">1,2,3</td></tr>
-                  <tr><td className="px-3 py-1">Subash P</td><td className="px-3 py-1 font-mono">7376252AD244</td><td className="px-3 py-1">6,7,5</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
         </div>
-      )}
-
-      {/* ── Step 1: Map Columns ────────────────────────── */}
-      {step === 1 && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-            <Settings2 size={16} className="text-indigo-500" />
-            Map Your Columns
-            <span className="ml-auto text-xs font-normal text-gray-400">
-              {rawRows.length} rows from "{fileName}"
-            </span>
-          </div>
-
-          {/* Name */}
-          <MappingRow label="Name" required value={nameCol} onChange={setNameCol}
-            headers={rawHeaders} sample={rawRows[0]?.[nameCol]}
-            valid={!!nameCol} />
-
-          {/* Register Number */}
-          <MappingRow label="Register Number" required value={regNoCol} onChange={setRegNoCol}
-            headers={rawHeaders} sample={rawRows[0]?.[regNoCol]}
-            valid={!!regNoCol} />
-
-          {/* Attendance Hours */}
-          <MappingRow label="Attendance Hours" required value={hoursCol} onChange={setHoursCol}
-            headers={rawHeaders} sample={rawRows[0]?.[hoursCol]}
-            valid={!!hoursCol} />
-
-          {/* Uploaded file data */}
-          {nameCol && regNoCol && hoursCol && rawRows.length > 0 && (
-            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
-              <p className="text-xs font-semibold text-gray-600 mb-3 flex items-center gap-1.5">
-                <FileSpreadsheet size={13} /> Uploaded Data ({rawRows.length} rows)
-              </p>
-              <div className="overflow-x-auto rounded-lg border border-orange-200 max-h-64 overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-orange-50 sticky top-0 z-10">
-                    <tr>
-                      <th className="px-3 py-2 text-left text-orange-700 font-semibold w-8">#</th>
-                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Name</th>
-                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Register number</th>
-                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Attendance hours</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-orange-100">
-                    {rawRows.map((row, i) => (
-                      <tr key={i} className="hover:bg-orange-50/50 transition-colors">
-                        <td className="px-3 py-1.5 text-gray-400">{i + 1}</td>
-                        <td className="px-3 py-1.5 text-gray-800">{String(row[nameCol] ?? '')}</td>
-                        <td className="px-3 py-1.5 font-mono text-gray-700">{String(row[regNoCol] ?? '')}</td>
-                        <td className="px-3 py-1.5 font-semibold text-orange-600">{String(row[hoursCol] ?? '')}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-3 pt-2">
-            <button type="button" className="btn-secondary" onClick={() => setStep(0)}>Back</button>
-            <button type="button" className="btn-primary"
-              disabled={!nameCol || !regNoCol || !hoursCol}
-              onClick={transformData}>
-              <ArrowRight size={16} /> Transform Data
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 2: Preview & Download ─────────────────── */}
-      {step === 2 && (
-        <div className="space-y-4">
-          {/* Stats */}
-          <div className="flex flex-wrap gap-3 items-center">
-            <div className="flex items-center gap-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg">
-              <FileSpreadsheet size={14} className="text-orange-500" />
-              <span className="text-sm font-medium text-orange-700">{rawRows.length} input rows</span>
-            </div>
-            <ArrowRight size={16} className="text-gray-300" />
-            <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg">
-              <CheckCircle2 size={14} className="text-green-600" />
-              <span className="text-sm font-medium text-green-800">{expandedRows.length} expanded rows</span>
-            </div>
-          </div>
-
-          {/* Table */}
-          <div className="overflow-x-auto rounded-xl border border-gray-200 max-h-80 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 sticky top-0 z-10">
-                <tr>
-                  <th className="px-4 py-2.5 text-left text-gray-600 font-semibold text-xs w-10">#</th>
-                  <th className="px-4 py-2.5 text-left text-gray-600 font-semibold text-xs">Name</th>
-                  <th className="px-4 py-2.5 text-left text-gray-600 font-semibold text-xs">Register number</th>
-                  <th className="px-4 py-2.5 text-left text-gray-600 font-semibold text-xs">Attendance hours</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {expandedRows.map((row, i) => (
-                  <tr key={i} className="hover:bg-gray-50/50 transition-colors">
-                    <td className="px-4 py-2 text-gray-400 text-xs">{i + 1}</td>
-                    <td className="px-4 py-2 text-gray-800">{row.Name}</td>
-                    <td className="px-4 py-2 font-mono text-sm text-gray-700">{row['Register number']}</td>
-                    <td className="px-4 py-2">
-                      <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold">
-                        {row['Attendance hours']}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Upload to Database */}
-          <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-xl space-y-4">
-            <p className="text-sm font-semibold text-indigo-800 flex items-center gap-2">
-              <Database size={16} /> Upload to Database
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="label">Date</label>
-                <input type="date" className="input" value={date}
-                  onChange={e => setDate(e.target.value)} max={TODAY} required />
-              </div>
-              <div>
-                <label className="label">Category</label>
-                <select className="input" value={category}
-                  onChange={e => setCategory(e.target.value)} required>
-                  <option value="">— Select category —</option>
-                  {activeCategories.map(c => (
-                    <option key={c.id} value={c.name}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <label className="flex items-start gap-3 cursor-pointer">
-              <input type="checkbox" checked={declared} onChange={e => setDeclared(e.target.checked)}
-                className="mt-0.5 w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500" />
-              <span className="text-xs text-indigo-700">
-                I confirm that the above attendance information is correct and accurate.
-              </span>
-            </label>
-          </div>
-
-          {/* Actions */}
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" className="btn-secondary" onClick={() => setStep(1)}>Back</button>
-            <button type="button" className="btn-primary"
-              disabled={submitLoading || !declared || !date || !category}
-              onClick={handleSubmitToDb}>
-              {submitLoading ? <LoadingSpinner size="sm" /> : <Send size={16} />}
-              {submitLoading ? 'Submitting…' : `Submit ${expandedRows.length} Records`}
-            </button>
-            <button type="button" className="btn-secondary" onClick={downloadExcel}>
-              <Download size={16} /> Download Excel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** Reusable column mapping row */
-function MappingRow({ label, required, value, onChange, headers, sample, valid }) {
-  return (
-    <div className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
-      valid ? 'border-green-200 bg-green-50/50' :
-      required ? 'border-red-200 bg-red-50/30' : 'border-gray-200 bg-gray-50/50'
-    }`}>
-      <div className="w-36 shrink-0">
-        <span className="text-sm font-medium text-gray-700">{label}</span>
-        {required && <span className="text-red-500 ml-0.5">*</span>}
-      </div>
-      <ArrowRight size={14} className="text-gray-300 shrink-0" />
-      <select className="input text-sm flex-1" value={value}
-        onChange={e => onChange(e.target.value)}>
-        <option value="">— Select column —</option>
-        {headers.map(h => <option key={h} value={h}>{h}</option>)}
-      </select>
-      {value && sample !== undefined && (
-        <span className="text-xs text-gray-400 shrink-0 truncate max-w-[140px]"
-          title={String(sample ?? '')}>
-          e.g. "{String(sample ?? '').slice(0, 20)}"
-        </span>
       )}
     </div>
   )
