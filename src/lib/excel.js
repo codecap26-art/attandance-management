@@ -1,6 +1,41 @@
 import * as XLSX from 'xlsx'
 
 /**
+ * Parse an uploaded Excel file and return structured data.
+ * @param {File} file - The uploaded file object
+ * @param {string} [sheetName] - Optional sheet name to read (defaults to first sheet)
+ * @returns {Promise<{ headers: string[], rows: object[], sheetNames: string[] }>}
+ */
+export async function importFromExcel(file, sheetName) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result)
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+        const sheetNames = workbook.SheetNames
+
+        const target = sheetName || sheetNames[0]
+        const worksheet = workbook.Sheets[target]
+        if (!worksheet) {
+          reject(new Error(`Sheet "${target}" not found.`))
+          return
+        }
+
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' })
+        const headers = jsonData.length > 0 ? Object.keys(jsonData[0]) : []
+
+        resolve({ headers, rows: jsonData, sheetNames })
+      } catch (err) {
+        reject(err)
+      }
+    }
+    reader.onerror = () => reject(new Error('Failed to read file.'))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+/**
  * Export attendance records to XLSX.
  * Only exports: Date, Reg No, Student Name, Period, Category.
  * @param {Array} records - Attendance log rows joined with student names
