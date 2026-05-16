@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { format } from 'date-fns'
 import toast from 'react-hot-toast'
-import { Send, CheckCircle2, History, ArrowRight, UserCheck } from 'lucide-react'
+import { Send, CheckCircle2, History, ArrowRight, UserCheck, AlertCircle } from 'lucide-react'
 import StudentSearch from './StudentSearch'
 import PeriodSelector from './PeriodSelector'
 import { useAttendance } from '../../hooks/useAttendance'
@@ -14,23 +14,20 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
   const { insertBulk, loading } = useAttendance()
   const { activeCategories } = useCategories()
 
-  const [selectedStudents, setSelectedStudents] = useState(prefill?.students ?? [])
+  const [selectedStudents, setSelectedStudents] = useState([])
   const [date,     setDate]     = useState(prefill?.date ?? TODAY)
   const [periods,  setPeriods]  = useState(prefill?.periods ?? [])
   const [category, setCategory] = useState(prefill?.category ?? '')
-
-  // Saved log
   const [savedLog, setSavedLog] = useState([])
 
-  // ── Save current student(s) ────────────────────────────
-  async function saveCurrentAndNext() {
-    if (selectedStudents.length === 0) { toast.error('Select a student first.'); return }
-    if (!date)              { toast.error('Select a date.'); return }
-    if (periods.length === 0) { toast.error('Select at least one period.'); return }
-    if (!category)          { toast.error('Select a category.'); return }
+  const savingRef = useRef(false)
+
+  // ── Save a specific student set ────────────────────────
+  const saveStudents = useCallback(async (students) => {
+    if (!date || periods.length === 0 || !category || students.length === 0) return false
 
     const entries = []
-    for (const student of selectedStudents) {
+    for (const student of students) {
       for (const period of periods) {
         entries.push({
           reg_no: student.reg_no,
@@ -43,23 +40,26 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
       }
     }
 
-    const toastId = toast.loading('Saving…')
     const result = await insertBulk(entries)
-    toast.dismiss(toastId)
 
     if (result.errors.length > 0) {
-      toast.error(`Error: ${result.errors[0]}`)
-      return
+      toast.error(`Save failed: ${result.errors[0]}`)
+      return false
     }
 
-    toast.success(
-      `Saved ${result.inserted} record${result.inserted !== 1 ? 's' : ''} for ${selectedStudents.map(s => s.full_name).join(', ')}`,
-      { duration: 2500 }
-    )
+    const count = result.inserted
+    if (count > 0) {
+      toast.success(
+        `Saved ${students.map(s => s.full_name).join(', ')} — ${count} record${count > 1 ? 's' : ''}`,
+        { duration: 2500 }
+      )
+    }
+    if (result.duplicates.length > 0) {
+      toast(`${result.duplicates.length} duplicate(s) skipped`, { icon: '⚠️', duration: 2000 })
+    }
 
-    // Add to saved log
     setSavedLog(prev => [
-      ...selectedStudents.map(s => ({
+      ...students.map(s => ({
         name: s.full_name,
         reg_no: s.reg_no,
         periods: [...periods],
@@ -70,14 +70,56 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
       ...prev,
     ])
 
-    // Clear student selection only — keep date/periods/category for next
-    setSelectedStudents([])
+    return true
+  }, [date, periods, category, insertBulk])
+
+  // ── Handle student selection change ────────────────────
+  // Single-select: clicking a new student auto-saves the current one
+  const handleSelectionChange = useCallback(async (newSelection) => {
+    const newStudent = newSelection.length > 0 ? newSelection[newSelection.length - 1] : null
+    const currentStudent = selectedStudents.length > 0 ? selectedStudents[0] : null
+
+    // If deselecting (empty), just clear
+    if (!newStudent) {
+      setSelectedStudents([])
+      return
+    }
+
+    // If same student clicked again, ignore
+    if (currentStudent && newStudent.reg_no === currentStudent.reg_no) {
+      return
+    }
+
+    // If we have a current student, auto-save them before switching
+    if (currentStudent && !savingRef.current) {
+      const canSave = date && periods.length > 0 && category
+      if (canSave) {
+        savingRef.current = true
+        await saveStudents([currentStudent])
+        savingRef.current = false
+      } else {
+        toast('Fill date, periods & category to enable auto-save', { icon: '⚠️' })
+      }
+    }
+
+    // Switch to ONLY the new student
+    setSelectedStudents([newStudent])
+  }, [selectedStudents, date, periods, category, saveStudents])
+
+  // ── Manual save & next ─────────────────────────────────
+  async function handleSaveAndNext() {
+    if (selectedStudents.length === 0) { toast.error('Select a student first.'); return }
+    if (!date)              { toast.error('Select a date.'); return }
+    if (periods.length === 0) { toast.error('Select at least one period.'); return }
+    if (!category)          { toast.error('Select a category.'); return }
+
+    const ok = await saveStudents(selectedStudents)
+    if (ok) setSelectedStudents([])
   }
 
-  // ── Final submit (same as Save & Next but also calls onSuccess) ──
   async function handleSubmit(e) {
     e.preventDefault()
-    await saveCurrentAndNext()
+    await handleSaveAndNext()
     onSuccess?.()
   }
 
@@ -89,17 +131,22 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
         <legend className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
           <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center">1</span>
           Select Student
+          {date && periods.length > 0 && category && selectedStudents.length > 0 && (
+            <span className="ml-2 text-xs font-normal text-green-600 flex items-center gap-1">
+              <CheckCircle2 size={12} /> Selecting next will auto-save current
+            </span>
+          )}
         </legend>
         <StudentSearch
           selectedStudents={selectedStudents}
-          onSelectionChange={setSelectedStudents}
+          onSelectionChange={handleSelectionChange}
           multiSelect
         />
       </fieldset>
 
       {/* Show who is selected */}
       {selectedStudents.length > 0 && (
-        <div className="flex items-center gap-3 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+        <div className="flex items-center gap-3 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200">
           <UserCheck size={18} className="text-indigo-600 shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-indigo-800">
@@ -109,6 +156,11 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
               {selectedStudents.map(s => s.reg_no).join(', ')}
             </p>
           </div>
+          {(!date || periods.length === 0 || !category) && (
+            <span className="text-xs text-amber-600 flex items-center gap-1 shrink-0">
+              <AlertCircle size={12} /> Fill below to save
+            </span>
+          )}
         </div>
       )}
 
@@ -118,14 +170,8 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
           <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center">2</span>
           Date
         </legend>
-        <input
-          type="date"
-          className="input max-w-xs"
-          value={date}
-          onChange={e => setDate(e.target.value)}
-          max={TODAY}
-          required
-        />
+        <input type="date" className="input max-w-xs" value={date}
+          onChange={e => setDate(e.target.value)} max={TODAY} required />
       </fieldset>
 
       {/* Step 3: Periods */}
@@ -143,12 +189,8 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
           <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-xs flex items-center justify-center">4</span>
           Category
         </legend>
-        <select
-          className="input max-w-xs"
-          value={category}
-          onChange={e => setCategory(e.target.value)}
-          required
-        >
+        <select className="input max-w-xs" value={category}
+          onChange={e => setCategory(e.target.value)} required>
           <option value="">— Select category —</option>
           {activeCategories.map(c => (
             <option key={c.id} value={c.name}>{c.name}</option>
@@ -158,22 +200,15 @@ export default function AttendanceForm({ prefill = null, onSuccess }) {
 
       {/* Buttons */}
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          className="btn-primary"
+        <button type="button" className="btn-primary"
           disabled={loading || selectedStudents.length === 0}
-          onClick={saveCurrentAndNext}
-        >
+          onClick={handleSaveAndNext}>
           {loading ? <LoadingSpinner size="sm" /> : <ArrowRight size={16} />}
           Save & Next
         </button>
-        <button
-          type="submit"
-          className="btn-secondary"
-          disabled={loading || selectedStudents.length === 0}
-        >
-          <Send size={16} />
-          Save & Finish
+        <button type="submit" className="btn-secondary"
+          disabled={loading || selectedStudents.length === 0}>
+          <Send size={16} /> Save & Finish
         </button>
         {selectedStudents.length > 0 && periods.length > 0 && (
           <p className="text-xs text-gray-400 ml-auto">

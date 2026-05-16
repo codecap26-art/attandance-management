@@ -4,7 +4,7 @@ import toast from 'react-hot-toast'
 import {
   Upload, FileSpreadsheet, Download, X,
   CheckCircle2, Send, ArrowRight, RotateCcw,
-  Settings2, Eye, ArrowDown
+  Settings2
 } from 'lucide-react'
 import { importFromExcel } from '../../lib/excel'
 import { exportToExcel } from '../../lib/excel'
@@ -254,56 +254,33 @@ export default function ExcelUpload({ onSuccess }) {
             headers={rawHeaders} sample={rawRows[0]?.[hoursCol]}
             valid={!!hoursCol} />
 
-          {/* Transformation preview */}
-          {nameCol && regNoCol && hoursCol && rawRows[0] && (
+          {/* Uploaded file data */}
+          {nameCol && regNoCol && hoursCol && rawRows.length > 0 && (
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
               <p className="text-xs font-semibold text-gray-600 mb-3 flex items-center gap-1.5">
-                <Eye size={13} /> Transformation Preview (Row 1)
+                <FileSpreadsheet size={13} /> Uploaded Data ({rawRows.length} rows)
               </p>
-              <div className="flex flex-col items-center gap-2">
-                {/* Input row */}
-                <div className="w-full overflow-x-auto rounded-lg border border-gray-200 text-xs">
-                  <table className="w-full">
-                    <thead className="bg-orange-50">
-                      <tr>
-                        <th className="px-3 py-1.5 text-left text-orange-700 font-semibold">Name</th>
-                        <th className="px-3 py-1.5 text-left text-orange-700 font-semibold">Register number</th>
-                        <th className="px-3 py-1.5 text-left text-orange-700 font-semibold">Attendance hours</th>
+              <div className="overflow-x-auto rounded-lg border border-orange-200 max-h-64 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-orange-50 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-orange-700 font-semibold w-8">#</th>
+                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Name</th>
+                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Register number</th>
+                      <th className="px-3 py-2 text-left text-orange-700 font-semibold">Attendance hours</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-orange-100">
+                    {rawRows.map((row, i) => (
+                      <tr key={i} className="hover:bg-orange-50/50 transition-colors">
+                        <td className="px-3 py-1.5 text-gray-400">{i + 1}</td>
+                        <td className="px-3 py-1.5 text-gray-800">{String(row[nameCol] ?? '')}</td>
+                        <td className="px-3 py-1.5 font-mono text-gray-700">{String(row[regNoCol] ?? '')}</td>
+                        <td className="px-3 py-1.5 font-semibold text-orange-600">{String(row[hoursCol] ?? '')}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td className="px-3 py-1.5">{String(rawRows[0][nameCol] ?? '')}</td>
-                        <td className="px-3 py-1.5 font-mono">{String(rawRows[0][regNoCol] ?? '')}</td>
-                        <td className="px-3 py-1.5 font-semibold text-orange-600">{String(rawRows[0][hoursCol] ?? '')}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                <ArrowDown size={18} className="text-indigo-400" />
-
-                {/* Output rows */}
-                <div className="w-full overflow-x-auto rounded-lg border border-green-200 text-xs">
-                  <table className="w-full">
-                    <thead className="bg-green-50">
-                      <tr>
-                        <th className="px-3 py-1.5 text-left text-green-700 font-semibold">Name</th>
-                        <th className="px-3 py-1.5 text-left text-green-700 font-semibold">Register number</th>
-                        <th className="px-3 py-1.5 text-left text-green-700 font-semibold">Attendance hours</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-green-100">
-                      {String(rawRows[0][hoursCol] ?? '').split(/[,\s]+/).filter(Boolean).map((h, i) => (
-                        <tr key={i}>
-                          <td className="px-3 py-1.5">{String(rawRows[0][nameCol] ?? '')}</td>
-                          <td className="px-3 py-1.5 font-mono">{String(rawRows[0][regNoCol] ?? '')}</td>
-                          <td className="px-3 py-1.5 font-semibold text-green-600">{h.trim()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -313,7 +290,7 @@ export default function ExcelUpload({ onSuccess }) {
             <button type="button" className="btn-primary"
               disabled={!nameCol || !regNoCol || !hoursCol}
               onClick={transformData}>
-              <ArrowDown size={16} /> Transform Data
+              <ArrowRight size={16} /> Transform Data
             </button>
           </div>
         </div>
