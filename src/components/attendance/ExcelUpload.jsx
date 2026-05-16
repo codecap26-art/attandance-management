@@ -4,16 +4,22 @@ import toast from 'react-hot-toast'
 import {
   Upload, FileSpreadsheet, Download, X,
   CheckCircle2, Send, ArrowRight, RotateCcw,
-  Settings2
+  Settings2, Database
 } from 'lucide-react'
 import { importFromExcel } from '../../lib/excel'
-import { exportToExcel } from '../../lib/excel'
 import * as XLSX from 'xlsx'
+import { useAttendance } from '../../hooks/useAttendance'
+import { useCategories } from '../../hooks/useCategories'
 import LoadingSpinner from '../common/LoadingSpinner'
+
+const TODAY = format(new Date(), 'yyyy-MM-dd')
 
 const STEPS = ['Upload', 'Map Columns', 'Preview & Download']
 
 export default function ExcelUpload({ onSuccess }) {
+  const { insertBulk, loading: submitLoading } = useAttendance()
+  const { activeCategories } = useCategories()
+
   const fileRef = useRef(null)
   const [step, setStep] = useState(0)
   const [dragOver, setDragOver] = useState(false)
@@ -30,6 +36,11 @@ export default function ExcelUpload({ onSuccess }) {
 
   // Transformed data
   const [expandedRows, setExpandedRows] = useState([])
+
+  // Database upload
+  const [date, setDate] = useState(TODAY)
+  const [category, setCategory] = useState('')
+  const [declared, setDeclared] = useState(false)
 
   // ── Upload ─────────────────────────────────────────────
   const handleFile = useCallback(async (file) => {
@@ -141,6 +152,39 @@ export default function ExcelUpload({ onSuccess }) {
     toast.success('Excel file downloaded!')
   }
 
+  // ── Submit to Database ─────────────────────────────────
+  async function handleSubmitToDb() {
+    if (expandedRows.length === 0) { toast.error('No data to submit.'); return }
+    if (!date) { toast.error('Select a date.'); return }
+    if (!category) { toast.error('Select a category.'); return }
+    if (!declared) { toast.error('Please confirm the declaration.'); return }
+
+    const entries = expandedRows.map(row => ({
+      reg_no: row['Register number'],
+      email: null,
+      date,
+      period: Number(row['Attendance hours']),
+      category,
+      declared: true,
+    }))
+
+    const toastId = toast.loading(`Inserting ${entries.length} records…`)
+    const result = await insertBulk(entries)
+    toast.dismiss(toastId)
+
+    if (result.errors.length > 0) {
+      toast.error(`Error: ${result.errors[0]}`)
+      return
+    }
+
+    toast.success(
+      `${result.inserted} record${result.inserted !== 1 ? 's' : ''} saved!` +
+      (result.duplicates.length > 0 ? ` ${result.duplicates.length} duplicate(s) skipped.` : '')
+    )
+    resetAll()
+    onSuccess?.()
+  }
+
   function resetAll() {
     setStep(0)
     setFileName('')
@@ -150,6 +194,9 @@ export default function ExcelUpload({ onSuccess }) {
     setRegNoCol('')
     setHoursCol('')
     setExpandedRows([])
+    setDate(TODAY)
+    setCategory('')
+    setDeclared(false)
     if (fileRef.current) fileRef.current.value = ''
   }
 
@@ -340,10 +387,49 @@ export default function ExcelUpload({ onSuccess }) {
             </table>
           </div>
 
+          {/* Upload to Database */}
+          <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-xl space-y-4">
+            <p className="text-sm font-semibold text-indigo-800 flex items-center gap-2">
+              <Database size={16} /> Upload to Database
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="label">Date</label>
+                <input type="date" className="input" value={date}
+                  onChange={e => setDate(e.target.value)} max={TODAY} required />
+              </div>
+              <div>
+                <label className="label">Category</label>
+                <select className="input" value={category}
+                  onChange={e => setCategory(e.target.value)} required>
+                  <option value="">— Select category —</option>
+                  {activeCategories.map(c => (
+                    <option key={c.id} value={c.name}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" checked={declared} onChange={e => setDeclared(e.target.checked)}
+                className="mt-0.5 w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500" />
+              <span className="text-xs text-indigo-700">
+                I confirm that the above attendance information is correct and accurate.
+              </span>
+            </label>
+          </div>
+
           {/* Actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button type="button" className="btn-secondary" onClick={() => setStep(1)}>Back</button>
-            <button type="button" className="btn-primary" onClick={downloadExcel}>
+            <button type="button" className="btn-primary"
+              disabled={submitLoading || !declared || !date || !category}
+              onClick={handleSubmitToDb}>
+              {submitLoading ? <LoadingSpinner size="sm" /> : <Send size={16} />}
+              {submitLoading ? 'Submitting…' : `Submit ${expandedRows.length} Records`}
+            </button>
+            <button type="button" className="btn-secondary" onClick={downloadExcel}>
               <Download size={16} /> Download Excel
             </button>
           </div>
